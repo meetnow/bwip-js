@@ -79,6 +79,30 @@ module.exports = function(req, res) {
 // 		`png` is a node Buffer containing the PNG image.
 //
 module.exports.toBuffer = function(args, callback) {
+	var rot = args.rotate || 'N';
+	module.exports.toBitmap(args, function(err, bitmap) {
+		if (err) {
+			callback(err);
+		} else {
+			bitmap.getPNG(rot, callback);
+		}
+	});
+}
+
+//
+// bwipjs.toBitmap(options, callback)
+//
+// Generates a Bitmap object.
+//
+// `options` are the bwip-js/BWIPP options wrapped in an object.
+// `callback` is an event handler with prototype:
+//
+// 		function callback(err, png)
+//
+// 		`err` is an Error object or string.  If `err` is set, `png` is null.
+// 		`png` is a node Buffer containing the PNG image.
+//
+module.exports.toBitmap = function(args, callback) {
 	// Finish loading bwip-js?
 	if (typeof sandbox.BWIPJS === 'undefined') {
 		load('bwip.js');
@@ -89,7 +113,6 @@ module.exports.toBuffer = function(args, callback) {
 	var scale	= args.scale || 2;
 	var scaleX	= +args.scaleX || scale;
 	var scaleY	= +args.scaleY || scaleX;
-	var rot		= args.rotate || 'N';
 	var mono	= args.monochrome || false;
 
 	// The required parameters
@@ -154,7 +177,7 @@ module.exports.toBuffer = function(args, callback) {
 		if (e) {
 			callback('BWIP-JS ERROR: ' + e);
 		} else {
-			bw.bitmap().getPNG(rot, callback);
+			callback(null, bw.bitmap());
 		}
 	});
 }
@@ -216,6 +239,22 @@ function Bitmap(bgcolor) {
 		_clrr = r;
 		_clrg = g;
 		_clrb = b;
+	}
+
+	this.get = function(x, y) {
+		x = Math.floor(x);
+		y = Math.floor(y);
+
+		if (x < _minx || x > _maxx || y < _miny || y > _maxy)
+			return null;
+
+		var xy	= x + ',' + y;
+		return _pixs[xy];
+	}
+
+	// Returns the frame geometry (top, right, bottom, left)
+	this.geometry = function() {
+		return [_miny, _maxx, _maxy, _minx];
 	}
 
 	this.set = function(x, y, a) {
