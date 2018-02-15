@@ -43,20 +43,7 @@ module.exports = function(req, res, opts) {
 	});
 }
 
-//
-// bwipjs.toBuffer(options, callback)
-//
-// Generates a PNG-encoded image in a buffer.
-//
-// `options` are the bwip-js/BWIPP options wrapped in an object.
-// `callback` is an event handler with prototype:
-//
-// 		function callback(err, png)
-//
-// 		`err` is an Error object or string.  If `err` is set, `png` is null.
-// 		`png` is a node Buffer containing the PNG image.
-//
-module.exports.toBuffer = function(args, callback) {
+function setupBwipjs(args) {
 	// Set the bwip-js defaults
 	var scale	= args.scale || 2;
 	var scaleX	= +args.scaleX || scale;
@@ -71,10 +58,10 @@ module.exports.toBuffer = function(args, callback) {
 	var text	= args.text;
 
 	if (!text) {
-		return callback('Bar code text not specified.');
+		throw new Error('Bar code text not specified.');
 	}
 	if (!bcid) {
-		return callback('Bar code type not specified.');
+		throw new Error('Bar code type not specified.');
 	}
 
 	// Initialize a barcode writer object.  This is the interface between
@@ -124,28 +111,74 @@ module.exports.toBuffer = function(args, callback) {
 	bw.bitmap().pad(padX*scaleX || 0, padY*scaleY || 0);
 	bw.scale(scaleX, scaleY);
 
-	// Call into the BWIPP cross-compiled code.
+	return {
+		bw: bw,
+		bcid: bcid,
+		text: text,
+		opts: opts
+	};
+}
+
+
+//
+// bwipjs.toBuffer(options, callback)
+//
+// Generates a PNG-encoded image in a buffer.
+//
+// `options` are the bwip-js/BWIPP options wrapped in an object.
+// `callback` is an event handler with prototype:
+//
+// 		function callback(err, png)
+//
+// 		`err` is an Error object or string.  If `err` is set, `png` is null.
+// 		`png` is a node Buffer containing the PNG image.
+//
+module.exports.toBuffer = function(args, callback) {
 	try {
-		var ts0 = Date.now();
-		bwipp()(bw, bcid, text, opts);
-		var ts1 = Date.now();
-		bw.render(callback);
-		var ts2 = Date.now();
+		var ret = setupBwipjs(args);
+		// Call into the BWIPP cross-compiled code.
+		bwipp()(ret.bw, ret.bcid, ret.text, ret.opts);
+		ret.bw.render(callback);
 	} catch (e) {
 		callback(e);
 	}
+}
 
-	// For testing...
-	//bw.render(function (err, png) {
-	//	if (err) {
-	//		callback(err);
-	//	} else {
-	//		var ts2 = Date.now();
-	//		console.log('Encoded,Rendered,Elapsed: ' + (ts1-ts0) + ',' + (ts2-ts1) +
-	//					',' + (ts2-ts0) + ' msecs');
-	//		callback(null, png);
-	//	}
-	//});
+//
+// bwipjs.toBitmap(options, callback)
+//
+// Generates a Bitmap object.
+//
+// `options` are the bwip-js/BWIPP options wrapped in an object.
+// `callback` is an event handler with prototype:
+//
+// 		function callback(err, png)
+//
+// 		`err` is an Error object or string.  If `err` is set, `png` is null.
+// 		`png` is a node Buffer containing the PNG image.
+//
+module.exports.toBitmap = function(args, callback) {
+	try {
+		var ret = setupBwipjs(args),
+			bmp = ret.bw.bitmap(),
+			fin = bmp.finalize;
+		// Temporarily replace the finalize method
+		bmp.finalize = function (cb) {
+			cb();
+		};
+		// Call into the BWIPP cross-compiled code.
+		bwipp()(ret.bw, ret.bcid, ret.text, ret.opts);
+		ret.bw.render(function (err) {
+			if (err != null) {
+				callback(err);
+			} else {
+				bmp.finalize = fin;
+				callback(null, bmp);
+			}
+		});
+	} catch (e) {
+		callback(e);
+	}
 }
 
 module.exports.useFreetype = function(useFT) {

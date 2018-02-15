@@ -151,6 +151,45 @@ module.exports = function(rot, bgcolor, opts) {
 		_clrb = b;
 	}
 
+	// Returns the frame geometry (top, right, bottom, left)
+	this.geometry = function() {
+		return [0, _imgw, _imgh, 0];
+	}
+
+	// Get the pixel value at the given coordinates; depending on Palette or
+	// TrueColor mode, this returns a palette index or ARGB value.
+	this.get = function(x, y) {
+		x = x|0;
+		y = y|0;
+
+		// Convert from bottom-up coordinates and add in the rotate transform.
+		if (rot == 'N') {
+			y = _imgh - y - 1;  // Invert y
+		} else if (rot == 'I') {
+			x = _imgw - x - 1;  // Invert x
+		} else {
+			y = _imgw - y;      // Invert y
+			if (rot == 'L') {
+				var t = y;
+				y = _imgh - x - 1;
+				x = t - 1;
+			} else {
+				var t = x;
+				x = _imgw - y;
+				y = t;
+			}
+		}
+
+		if (_pngtype == PNGTYPE_PALETTE) {
+			// Palette Color
+			return _imgbuf[_imgrow * (y + _pady) + 1 + _padx + x];
+		} else {
+			// TrueColor with Alpha
+			var pos = _imgrow * (y + _pady) + 1 + (_padx + x) * 4;
+			return ((_imgbuf[pos+3]<<24) | (_imgbuf[pos+0]<<16) | (_imgbuf[pos+1]<<8) | _imgbuf[pos+2])>>>0;
+		}
+	}
+
 	// Set a pixel to the ARGB color.  Coordinates are in PostScript convention,
 	// with 0,0 at the bottom-left of the page. 
 	this.set = function(x, y, a) {
