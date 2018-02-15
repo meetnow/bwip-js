@@ -1,51 +1,24 @@
-// file: node-bwipjs
+// file: bwip-js/node-bwipjs.js
 //
-// Copyright (c) 2011-2016 Mark Warren
+// Copyright (c) 2011-2017 Mark Warren
 //
 // See the LICENSE file in the bwip-js root directory
 // for the extended copyright notice.
 //
+"use strict";
+
 var url	= require('url'),
-	fs	= require('fs'),
-	vm	= require('vm'),
-	zlibPNG	= require(__dirname + '/node-zlibPNG')
+	bwipp = require('./bwipp'),
+	bwipjs = require('./bwipjs'),
+	Bitmap = require('./node-bitmap'),
+	fixedfont = require('./node-fonts')	// freetype alternative, default
 	;
 
-// The global inside a sandboxed context is virtually useless.  None of
-// the goodies available in a primary context.
-// Emscripten uses the existence of require() and process to decide whether it is
-// running in node.  And console is really nice to have.  
-// And it cannot run without all of the TypedArray constructors.
-var sandbox = vm.createContext({
-		require:require,
-		process:process,
-		console:console,
-		ArrayBuffer:ArrayBuffer, DataView:DataView,
-		Int8Array:Int8Array, Uint8Array:Uint8Array,
-		Uint8ClampedArray:Uint8ClampedArray,
-		Int16Array:Int16Array, Uint16Array:Uint16Array,
-		Int32Array:Int32Array, Uint32Array:Uint32Array,
-		Float32Array:Float32Array, Float64Array:Float64Array,
-
-		// The .mem image makes it really hard to use as a library module
-		Module:{ memoryInitializerPrefixURL : __dirname + '/' }
-	});
-
-load('freetype.js');
-
-// We will use a synchronous demand-loader as each module's load-cost is
-// a one-time hit and it prevents any potential race conditions.
-function load(path) {
-	var text = fs.readFileSync(__dirname + '/' + path);
-	if (!text)
-		throw new Error(path + ": could not read file");
-
-	vm.runInContext(text, sandbox, { filename:path });
-}
-
+// freetype is the module, freefont is the font manager interface identical to fixedfont
+var freetype, freefont;
 
 // This module's primary export is the bwip-js HTTP request handler
-module.exports = function(req, res) {
+module.exports = function(req, res, opts) {
 	var args = url.parse(req.url, true).query;
 
 	// Convert boolean empty parameters to true
@@ -53,11 +26,16 @@ module.exports = function(req, res) {
 		if (args[id] === '')
 			args[id] = true;
 	}
+	// Add in server options/overrides
+	opts = opts || {};
+	for (var id in opts) {
+		args[id] = opts[id];
+	}
 
 	module.exports.toBuffer(args, function(err, png) {
 		if (err) {
 			res.writeHead(400, { 'Content-Type':'text/plain' });
-			res.end(err, 'ascii');
+			res.end('' + (err.stack || err), 'utf-8');
 		} else {
 			res.writeHead(200, { 'Content-Type':'image/png' });
 			res.end(png, 'binary');
@@ -79,270 +57,163 @@ module.exports = function(req, res) {
 // 		`png` is a node Buffer containing the PNG image.
 //
 module.exports.toBuffer = function(args, callback) {
-	var rot = args.rotate || 'N';
-	module.exports.toBitmap(args, function(err, bitmap) {
-		if (err) {
-			callback(err);
-		} else {
-			bitmap.getPNG(rot, callback);
-		}
-	});
-}
-
-//
-// bwipjs.toBitmap(options, callback)
-//
-// Generates a Bitmap object.
-//
-// `options` are the bwip-js/BWIPP options wrapped in an object.
-// `callback` is an event handler with prototype:
-//
-// 		function callback(err, png)
-//
-// 		`err` is an Error object or string.  If `err` is set, `png` is null.
-// 		`png` is a node Buffer containing the PNG image.
-//
-module.exports.toBitmap = function(args, callback) {
-	// Finish loading bwip-js?
-	if (typeof sandbox.BWIPJS === 'undefined') {
-		load('bwip.js');
-		sandbox.BWIPJS.load = load;
-	}
-
-	// Set the defaults
+	// Set the bwip-js defaults
 	var scale	= args.scale || 2;
 	var scaleX	= +args.scaleX || scale;
 	var scaleY	= +args.scaleY || scaleX;
+	var rot		= args.rotate || 'N';
 	var mono	= args.monochrome || false;
+	var padX	= +args.paddingwidth || 0;
+	var padY	= +args.paddingheight || 0;
 
 	// The required parameters
 	var bcid	= args.bcid;
 	var text	= args.text;
 
-	if (!text)
+	if (!text) {
 		return callback('Bar code text not specified.');
-	if (!bcid)
+	}
+	if (!bcid) {
 		return callback('Bar code type not specified.');
-	if (!fs.existsSync(__dirname + '/bwipp/' + bcid + '.js'))
-		return callback('Bar code type "' + bcid + '" unknown.');
+	}
 
-	// Remove the non-BWIPP options
-	delete args.scale;
-	delete args.scaleX;
-	delete args.scaleY;
-	delete args.rotate;
-	delete args.text;
-	delete args.bcid;
-	delete args.monochrome;
+	// Initialize a barcode writer object.  This is the interface between
+	// the low-level BWIPP code, the font manager, and the Bitmap object.
+	var bw = new bwipjs(freefont || fixedfont, mono);
 
-	// Initialize a barcode writer object
-	var bw = new sandbox.BWIPJS;
-
-	// Set the options
+	// Set the BWIPP options
 	var opts = {};
 	for (var id in args) {
-		opts[id] = bw.value(args[id]);
+		opts[id] = args[id];
 	}
+
+	// Remove the non-BWIPP options
+	delete opts.bcid;
+	delete opts.text;
+	delete opts.scale;
+	delete opts.scaleX;
+	delete opts.scaleY;
+	delete opts.rotate;
+	delete opts.monochrome;
+	delete opts.paddingwidth;
+	delete opts.paddingheight;
 
 	// Fix a disconnect in the BWIPP rendering logic
-	if (opts.alttext)
-		opts.includetext = bw.value(true);
-
+	if (opts.alttext) {
+		opts.includetext = true;
+	}
 	// We use mm rather than inches for height - except pharmacode2 height
-	// is explicitly in mm
-	if (opts.height && bcid != 'pharmacode2')
+	// which is already in mm.
+	if (+opts.height && bcid != 'pharmacode2') {
 		opts.height = opts.height / 25.4 || 0.5;
-	
-	// Enable/disable monochrome font rendering
-	sandbox.BWIPJS.ft_monochrome(mono ? 1 : 0);
-
-	// Feature or bug, BWIPP does not extend the background color into the
-	// human readable text.  Fix that in the bitmap interface.
-	if (opts.backgroundcolor) {
-		bw.bitmap(new Bitmap(parseInt(''+opts.backgroundcolor, 16)));
-		delete opts.backgroundcolor;
-	} else {
-		bw.bitmap(new Bitmap);
+	}
+	// Likewise, width
+	if (+opts.width) {
+		opts.width = opts.width / 25.4 || 0;
 	}
 
-	// Add optional padding around the image.
-	bw.bitmap().pad(+opts.paddingwidth*scaleX || 0,
-					+opts.paddingheight*scaleY || 0);
+	// Override the `backgroundcolor` option.
+	if (opts.backgroundcolor != null) {
+		bw.bitmap(new Bitmap(rot, opts.backgroundcolor, opts));
+		delete opts.backgroundcolor;
+	} else {
+		bw.bitmap(new Bitmap(rot, null, opts));
+	}
 
+	// Add optional padding and scale the image.
+	bw.bitmap().pad(padX*scaleX || 0, padY*scaleY || 0);
 	bw.scale(scaleX, scaleY);
-	bw.push(text);
-	bw.push(opts);
 
-	bw.call(bcid, function(e) {
-		if (e) {
-			callback('BWIP-JS ERROR: ' + e);
-		} else {
-			callback(null, bw.bitmap());
-		}
-	});
+	// Call into the BWIPP cross-compiled code.
+	try {
+		var ts0 = Date.now();
+		bwipp()(bw, bcid, text, opts);
+		var ts1 = Date.now();
+		bw.render(callback);
+		var ts2 = Date.now();
+	} catch (e) {
+		callback(e);
+	}
+
+	// For testing...
+	//bw.render(function (err, png) {
+	//	if (err) {
+	//		callback(err);
+	//	} else {
+	//		var ts2 = Date.now();
+	//		console.log('Encoded,Rendered,Elapsed: ' + (ts1-ts0) + ',' + (ts2-ts1) +
+	//					',' + (ts2-ts0) + ' msecs');
+	//		callback(null, png);
+	//	}
+	//});
+}
+
+module.exports.useFreetype = function(useFT) {
+	if (useFT || useFT == null) {
+		freetype = require('./freetype');
+		
+		var ft_monochr	= freetype.cwrap("monochrome", 'number', ['number']);
+		var ft_lookup	= freetype.cwrap("find_font", 'number', ['string']);
+		var ft_bitmap	= freetype.cwrap("get_bitmap", 'number',
+										['number','number','number','number']);
+		var ft_width	= freetype.cwrap("get_width", 'number', []);
+		var ft_height	= freetype.cwrap("get_height", 'number', []);
+		var ft_left		= freetype.cwrap("get_left", 'number', []);
+		var ft_top		= freetype.cwrap("get_top", 'number', []);
+		var ft_advance	= freetype.cwrap("get_advance", 'number', []);
+
+		// bwipjs needs the following interfaces:
+		//	lookup(fontname)	returns fontid
+		//	monochrome(bool)	set the fonts to monochrome or anti-aliased
+		//	getglyph(fontid, charcode, width, height)
+		freefont = {
+			lookup(name) {
+				return ft_lookup(name);
+			},
+			monochrome(enable) {
+				return ft_monochr(enable ? 1 : 0);
+			},
+			getglyph(fontid, charcode, size) {
+				var offset = ft_bitmap(fontid, charcode, size, size);
+				if (offset <= 0) {
+					return { width:0, height:0, top:0, left:0, advance:ft_advance() };
+				}
+				return {
+					width:ft_width(), height:ft_height(), top:ft_top(), left:ft_left(),
+					advance:ft_advance(), bytes:freetype.HEAPU8, offset:offset
+				}
+			}
+		};
+
+		// Bring in the custom symbol font for maxicode support (and dotcode when that
+		// renderer changes).
+		module.exports.loadFont('Symbol', 100,
+				require('fs').readFileSync(__dirname + '/fonts/BWIPJS-Symbol.otf', 'binary'));
+	} else {
+		freetype = freefont = null;
+	}
 }
 
 module.exports.loadFont = function(fontname, sizemult, fontfile) {
-	sandbox.Module.FS_createDataFile('/', fontname, fontfile, true, false);
+	freetype.FS_createDataFile('/', fontname, fontfile, true, false);
 
-	var load_font = sandbox.Module.cwrap("load_font", 'number',
+	var load_font = freetype.cwrap("load_font", 'number',
 										['string','string','number']);
 	var rv = load_font('/' + fontname, fontname, sizemult);
 	if (rv != 0) {
-		sandbox.FS.unlink('/' + fontname);
+		freetype.FS_unlink('/' + fontname);
 		throw 'Error: font load failed [' + rv + ']';
 	}
 }
 
 module.exports.unloadFont = function(fontname) {
 	// Unload from freetype
-	var close_font = sandbox.Module.cwrap("close_font", 'number', ['string']);
+	var close_font = freetype.cwrap("close_font", 'number', ['string']);
 	close_font(fontname);
 
 	// Delete from emscripten
-	sandbox.FS.unlink('/' + fontname);
+	freetype.FS_unlink('/' + fontname);
 }
 
-
-// bwip-js bitmap interface
-// Must export to the PostScript emulation:
-//		this.color(r, g, b)		## The color to use for subsequent set()'s.
-//		this.set(x, y, a)		## Sets the pixel at (x,y) using the current
-//								## color with alpha-a.
-//
-// bgcolor is optional.  If specified, if must be an integer or string RGB value.
-//						 Alpha channel is not supported.
-function Bitmap(bgcolor) {
-	var _clrr = 0;					// current red
-	var _clrg = 0;					// current green
-	var _clrb = 0;					// current blue
-	var _pixs = {};					// x,y = argb
-	var _minx = Infinity;
-	var _miny = Infinity;
-	var _maxx = 0;
-	var _maxy = 0;
-	var _padx = 0;					// optional left/right padding
-	var _pady = 0;					// optional top/bottom padding
-
-	if (typeof bgcolor === 'string')
-		bgcolor = (0xff000000 | parseInt(bgcolor, 16)) >>> 0;
-	else if (bgcolor !== undefined)
-		bgcolor = (0xff000000 | bgcolor) >>> 0;
-
-	// Optional padding.  Rotates with the image.
-	this.pad = function(width, height) {
-		_padx = width;
-		_pady = height;
-	}
-
-	this.color = function(r,g,b) {
-		_clrr = r;
-		_clrg = g;
-		_clrb = b;
-	}
-
-	this.get = function(x, y) {
-		x = Math.floor(x);
-		y = Math.floor(y);
-
-		if (x < _minx || x > _maxx || y < _miny || y > _maxy)
-			return null;
-
-		var xy	= x + ',' + y;
-		return _pixs[xy];
-	}
-
-	// Returns the frame geometry (top, right, bottom, left)
-	this.geometry = function() {
-		return [_miny, _maxx, _maxy, _minx];
-	}
-
-	this.set = function(x, y, a) {
-		// postscript graphics work with floating-pt numbers
-		x = Math.floor(x);
-		y = Math.floor(y);
-
-		if (_minx > x) _minx = x;
-		if (_maxx < x) _maxx = x;
-		if (_miny > y) _miny = y;
-		if (_maxy < y) _maxy = y;
-		
-		var xy	= x + ',' + y;
-		var cx	= _pixs[xy];
-		var r, g, b;
-		if (cx === undefined)
-			cx = bgcolor;
-		if (cx === undefined) {
-			r = _clrr;
-			g = _clrg;
-			b = _clrb;
-		} else {
-			// alpha-blend with the existing color
-			// dst is the existing "background" color
-			// src is the new color
-			var dsta = (cx >>> 24) / 255;
-			var dstr = (cx >>> 16) & 0xff;
-			var dstg = (cx >>>  8) & 0xff;
-			var dstb = cx & 0xff;
-			var srca = a / 255;
-			var newa = srca + dsta * (1 - srca);	// new alpha 0.0 - 1.0
-			if (!newa) {
-				r = g = b = a = 0;
-			} else {
-				r = ((_clrr * srca + dstr * dsta * (1 - srca)) / newa)|0;
-				g = ((_clrg * srca + dstg * dsta * (1 - srca)) / newa)|0;
-				b = ((_clrb * srca + dstb * dsta * (1 - srca)) / newa)|0;
-				a = (newa * 255)|0;
-			}
-		}
-
-		_pixs[xy] = ((a << 24) | (r << 16) | (g << 8) | b) >>> 0;
-	}
-
-	// `rot` is the desired image rotation
-	// `callback` prototype: function(err, png)
-	this.getPNG = function(rot, callback) {
-		// determine image width and height
-		if (rot == 'R' || rot == 'L') {
-			var h = _maxx-_minx+1;
-			var w = _maxy-_miny+1;
-			// Swap padding values
-			var t = _pady;
-			_pady = _padx;
-			_padx = t;
-		} else {
-			var w = _maxx-_minx+1;
-			var h = _maxy-_miny+1;
-		}
-
-		var png = new zlibPNG(w + 2*_padx, h + 2*_pady, bgcolor);
-
-		for (var xy in _pixs) {
-			var pts = xy.split(',');
-			var x	= +pts[0] - _minx;
-			var y	= +pts[1] - _miny;
-
-			// PostScript builds bottom-up, we build top-down.
-			if (rot == 'N') {
-				y = h - y - 1; 	// Invert y
-			} else if (rot == 'I') {
-				x = w - x - 1;	// Invert x
-			} else {
-				y = w - y; 		// Invert y
-				if (rot == 'L') {
-					var t = y;
-					y = h - x - 1;
-					x = t - 1;
-				} else {
-					var t = x;
-					x = w - y;
-					y = t;
-				}
-			}
-			png.set(x + _padx, y + _pady, _pixs[xy]);
-		}
-
-		return png.render(callback);
-	}
-}
-
+module.exports.bwipjs_version = bwipjs.VERSION;
+module.exports.bwipp_version = bwipp.VERSION;
